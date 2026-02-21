@@ -161,6 +161,7 @@
           background: #e0e0e0;
         }
         .case-toggle {
+          position: relative;
           font-weight: 600;
           font-size: 12px;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -173,10 +174,28 @@
           color: #fff;
           border-color: #4a90d9;
         }
+        .case-toggle .tooltip {
+          display: none;
+          position: absolute;
+          top: calc(100% + 6px);
+          left: 50%;
+          transform: translateX(-50%);
+          background: #333;
+          color: #fff;
+          font-size: 11px;
+          font-weight: 400;
+          padding: 4px 8px;
+          border-radius: 4px;
+          white-space: nowrap;
+          pointer-events: none;
+        }
+        .case-toggle:hover .tooltip {
+          display: block;
+        }
       </style>
       <div class="search-box">
         <input type="text" placeholder="Regex pattern" spellcheck="false" autocomplete="off" />
-        <button class="case-toggle" title="Case insensitive (Aa)">Aa</button>
+        <button class="case-toggle">Aa<span class="tooltip"></span></button>
         <span class="count"></span>
         <button class="prev" title="Previous match (Shift+Enter)">&#x25B2;</button>
         <button class="next" title="Next match (Enter)">&#x25BC;</button>
@@ -193,9 +212,10 @@
     const closeBtn = shadowRoot.querySelector('.close');
 
     // Restore toggle state across open/close
+    const caseTip = caseBtn.querySelector('.tooltip');
     function updateCaseBtn() {
       caseBtn.classList.toggle('active', caseInsensitive);
-      caseBtn.title = caseInsensitive
+      caseTip.textContent = caseInsensitive
         ? 'Case insensitive (click to match exact case)'
         : 'Case sensitive (click to ignore case)';
     }

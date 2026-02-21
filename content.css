@@ -1,0 +1,13 @@
+.regex-search-highlight {
+  background-color: #ffff00 !important;
+  color: #000 !important;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
+}
+
+.regex-search-highlight-current {
+  background-color: #ff9632 !important;
+  color: #000 !important;
+  border-radius: 2px;
+  box-shadow: 0 0 0 2px #ff9632;
+}

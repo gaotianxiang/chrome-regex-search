@@ -1,10 +1,97 @@
 (() => {
   let searchBar = null;
   let shadowRoot = null;
-  let matches = [];
+  let matchGroups = []; // Each entry is an array of <mark> elements forming one logical match
   let currentIndex = -1;
   let debounceTimer = null;
+  let lastToggle = 0;
 
+  const SKIP_TAGS = new Set([
+    'SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'OBJECT', 'EMBED',
+    'TEXTAREA', 'INPUT', 'SELECT',
+  ]);
+
+  // ── Keyboard fallback ────────────────────────────────────────────────
+  // chrome.commands.suggested_key is not guaranteed to bind.
+  // This listener acts as a reliable fallback.
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'KeyF') {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSearch();
+    }
+  }, true);
+
+  // ── Toggle guard ─────────────────────────────────────────────────────
+  // Both chrome.commands and the keyboard listener may fire for the same
+  // keystroke. The guard prevents a double-toggle within 300 ms.
+  function toggleSearch() {
+    const now = Date.now();
+    if (now - lastToggle < 300) return;
+    lastToggle = now;
+
+    if (searchBar) {
+      closeSearch();
+    } else {
+      createSearchBar();
+    }
+  }
+
+  // ── DOM helpers ──────────────────────────────────────────────────────
+  function isBlockDisplay(el) {
+    const display = window.getComputedStyle(el).display;
+    return !display.startsWith('inline') && display !== 'contents' && display !== 'ruby';
+  }
+
+  function isVisible(el) {
+    const style = window.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  }
+
+  // Collect text nodes grouped into "inline runs".
+  // A new run starts/ends at every block-level element boundary.
+  function collectTextRuns(root) {
+    const runs = [];
+    let currentRun = [];
+
+    function flush() {
+      if (currentRun.length > 0) {
+        runs.push(currentRun);
+        currentRun = [];
+      }
+    }
+
+    function walk(node) {
+      if (node === searchBar) return;
+      if (node.id === 'regex-search-container') return;
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (node.textContent.length > 0) {
+          currentRun.push(node);
+        }
+        return;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (SKIP_TAGS.has(node.tagName)) return;
+      if (!isVisible(node)) return;
+
+      const block = isBlockDisplay(node);
+      if (block) flush();
+
+      for (const child of node.childNodes) {
+        walk(child);
+      }
+
+      if (block) flush();
+    }
+
+    walk(root);
+    flush();
+    return runs;
+  }
+
+  // ── Search bar UI ────────────────────────────────────────────────────
   function createSearchBar() {
     if (searchBar) return;
 
@@ -115,9 +202,10 @@
     input.focus();
   }
 
+  // ── Search logic ─────────────────────────────────────────────────────
   function performSearch(pattern) {
     clearHighlights();
-    matches = [];
+    matchGroups = [];
     currentIndex = -1;
 
     const input = shadowRoot.querySelector('input');
@@ -139,116 +227,144 @@
       return;
     }
 
-    highlightMatches(regex);
+    // Walk the DOM and highlight
+    const runs = collectTextRuns(document.body);
+    for (const textNodes of runs) {
+      highlightRun(textNodes, regex);
+    }
 
-    if (matches.length > 0) {
+    if (matchGroups.length > 0) {
       currentIndex = 0;
       updateCurrentHighlight();
-      countEl.textContent = `1 of ${matches.length}`;
+      countEl.textContent = `1 of ${matchGroups.length}`;
     } else {
       countEl.textContent = '0 of 0';
     }
   }
 
-  function highlightMatches(regex) {
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          // Skip our own search bar and hidden elements
-          if (searchBar && searchBar.contains(node)) return NodeFilter.FILTER_REJECT;
-          if (node.parentElement && node.parentElement.closest('#regex-search-container')) return NodeFilter.FILTER_REJECT;
-
-          const style = window.getComputedStyle(node.parentElement);
-          if (style.display === 'none' || style.visibility === 'hidden') {
-            return NodeFilter.FILTER_REJECT;
-          }
-
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
-
-    const textNodes = [];
-    while (walker.nextNode()) {
-      textNodes.push(walker.currentNode);
-    }
+  // Highlight all regex matches within one inline text run.
+  // A run is an array of adjacent text nodes (separated only by inline elements).
+  // Concatenating them lets us match across element boundaries just like
+  // the native Cmd+F does.
+  function highlightRun(textNodes, regex) {
+    // 1. Build concatenated text + offset map
+    let fullText = '';
+    const nodeRanges = [];
 
     for (const node of textNodes) {
-      const text = node.textContent;
-      if (!text) continue;
+      const start = fullText.length;
+      fullText += node.textContent;
+      nodeRanges.push({ node, start, end: fullText.length });
+    }
 
-      // Reset regex lastIndex for each node
-      regex.lastIndex = 0;
+    // 2. Find all matches in the concatenated text
+    regex.lastIndex = 0;
+    const matchRanges = [];
+    let match;
+    while ((match = regex.exec(fullText)) !== null) {
+      if (match[0].length === 0) { regex.lastIndex++; continue; }
+      matchRanges.push([match.index, match.index + match[0].length]);
+    }
 
+    if (matchRanges.length === 0) return;
+
+    // 3. One mark-group per regex match (a match may span multiple text nodes)
+    const matchMarks = matchRanges.map(() => []);
+
+    // 4. Project matches onto individual text nodes and replace
+    for (const { node, start, end } of nodeRanges) {
+      const nodeText = node.textContent;
       const fragments = [];
-      let lastIndex = 0;
-      let match;
+      let pos = 0; // cursor within nodeText
 
-      while ((match = regex.exec(text)) !== null) {
-        if (match[0].length === 0) {
-          // Avoid infinite loop on zero-length matches
-          regex.lastIndex++;
-          continue;
+      for (let mIdx = 0; mIdx < matchRanges.length; mIdx++) {
+        const [mStart, mEnd] = matchRanges[mIdx];
+
+        // Clamp to this node's range
+        const localStart = Math.max(mStart - start, 0);
+        const localEnd = Math.min(mEnd - start, nodeText.length);
+
+        // Skip non-overlapping matches
+        if (localStart >= localEnd || localStart >= nodeText.length || localEnd <= 0) continue;
+        if (localStart < pos) continue;
+
+        // Text before the matched slice
+        if (localStart > pos) {
+          fragments.push({ type: 'text', text: nodeText.slice(pos, localStart) });
         }
 
-        if (match.index > lastIndex) {
-          fragments.push(document.createTextNode(text.slice(lastIndex, match.index)));
-        }
-
-        const mark = document.createElement('mark');
-        mark.className = 'regex-search-highlight';
-        mark.textContent = match[0];
-        fragments.push(mark);
-        matches.push(mark);
-
-        lastIndex = regex.lastIndex;
+        fragments.push({ type: 'mark', text: nodeText.slice(localStart, localEnd), matchIdx: mIdx });
+        pos = localEnd;
       }
 
-      if (fragments.length > 0) {
-        if (lastIndex < text.length) {
-          fragments.push(document.createTextNode(text.slice(lastIndex)));
-        }
+      // Nothing to replace in this node
+      if (fragments.length === 0) continue;
 
-        const parent = node.parentNode;
-        for (const frag of fragments) {
-          parent.insertBefore(frag, node);
+      // Remaining text after last match
+      if (pos < nodeText.length) {
+        fragments.push({ type: 'text', text: nodeText.slice(pos) });
+      }
+
+      // Replace the original text node with fragments
+      const parent = node.parentNode;
+      for (const frag of fragments) {
+        if (frag.type === 'text') {
+          parent.insertBefore(document.createTextNode(frag.text), node);
+        } else {
+          const mark = document.createElement('mark');
+          mark.className = 'regex-search-highlight';
+          mark.textContent = frag.text;
+          parent.insertBefore(mark, node);
+          matchMarks[frag.matchIdx].push(mark);
         }
-        parent.removeChild(node);
+      }
+      parent.removeChild(node);
+    }
+
+    // 5. Register non-empty groups
+    for (const marks of matchMarks) {
+      if (marks.length > 0) {
+        matchGroups.push(marks);
       }
     }
   }
 
+  // ── Highlight management ─────────────────────────────────────────────
   function clearHighlights() {
-    const marks = document.querySelectorAll('mark.regex-search-highlight, mark.regex-search-highlight-current');
+    const marks = document.querySelectorAll(
+      'mark.regex-search-highlight, mark.regex-search-highlight-current'
+    );
     for (const mark of marks) {
       const parent = mark.parentNode;
-      const text = document.createTextNode(mark.textContent);
-      parent.replaceChild(text, mark);
+      parent.replaceChild(document.createTextNode(mark.textContent), mark);
       parent.normalize();
     }
-    matches = [];
+    matchGroups = [];
     currentIndex = -1;
   }
 
   function navigateMatch(direction) {
-    if (matches.length === 0) return;
+    if (matchGroups.length === 0) return;
 
-    currentIndex = (currentIndex + direction + matches.length) % matches.length;
+    currentIndex = (currentIndex + direction + matchGroups.length) % matchGroups.length;
     updateCurrentHighlight();
 
     const countEl = shadowRoot.querySelector('.count');
-    countEl.textContent = `${currentIndex + 1} of ${matches.length}`;
+    countEl.textContent = `${currentIndex + 1} of ${matchGroups.length}`;
   }
 
   function updateCurrentHighlight() {
-    for (const m of matches) {
-      m.className = 'regex-search-highlight';
+    for (const group of matchGroups) {
+      for (const m of group) {
+        m.className = 'regex-search-highlight';
+      }
     }
-    if (currentIndex >= 0 && currentIndex < matches.length) {
-      matches[currentIndex].className = 'regex-search-highlight-current';
-      matches[currentIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (currentIndex >= 0 && currentIndex < matchGroups.length) {
+      const group = matchGroups[currentIndex];
+      for (const m of group) {
+        m.className = 'regex-search-highlight-current';
+      }
+      group[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }
 
@@ -261,14 +377,7 @@
     }
   }
 
-  function toggleSearch() {
-    if (searchBar) {
-      closeSearch();
-    } else {
-      createSearchBar();
-    }
-  }
-
+  // ── Message from background service worker ───────────────────────────
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'toggle-search') {
       toggleSearch();

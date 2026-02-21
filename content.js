@@ -5,6 +5,7 @@
   let currentIndex = -1;
   let debounceTimer = null;
   let lastToggle = 0;
+  let caseInsensitive = false;
 
   const SKIP_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'OBJECT', 'EMBED',
@@ -159,9 +160,23 @@
         button:active {
           background: #e0e0e0;
         }
+        .case-toggle {
+          font-weight: 600;
+          font-size: 12px;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          padding: 3px 6px;
+          min-width: 28px;
+          text-align: center;
+        }
+        .case-toggle.active {
+          background: #4a90d9;
+          color: #fff;
+          border-color: #4a90d9;
+        }
       </style>
       <div class="search-box">
         <input type="text" placeholder="Regex pattern" spellcheck="false" autocomplete="off" />
+        <button class="case-toggle" title="Case insensitive (Aa)">Aa</button>
         <span class="count"></span>
         <button class="prev" title="Previous match (Shift+Enter)">&#x25B2;</button>
         <button class="next" title="Next match (Enter)">&#x25BC;</button>
@@ -172,13 +187,23 @@
     document.documentElement.appendChild(searchBar);
 
     const input = shadowRoot.querySelector('input');
+    const caseBtn = shadowRoot.querySelector('.case-toggle');
     const prevBtn = shadowRoot.querySelector('.prev');
     const nextBtn = shadowRoot.querySelector('.next');
     const closeBtn = shadowRoot.querySelector('.close');
 
+    // Restore toggle state across open/close
+    if (caseInsensitive) caseBtn.classList.add('active');
+
     input.addEventListener('input', () => {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => performSearch(input.value), 200);
+    });
+
+    caseBtn.addEventListener('click', () => {
+      caseInsensitive = !caseInsensitive;
+      caseBtn.classList.toggle('active', caseInsensitive);
+      if (input.value) performSearch(input.value);
     });
 
     input.addEventListener('keydown', (e) => {
@@ -217,9 +242,19 @@
       return;
     }
 
+    // Support (?i) prefix as a convenience (not valid JS regex syntax)
+    let flags = 'g';
+    let pat = pattern;
+    if (/^\(\?([gimsuy]+)\)/.test(pat)) {
+      flags = 'g' + RegExp.$1.replace('g', '');
+      pat = pat.replace(/^\(\?[gimsuy]+\)/, '');
+    } else if (caseInsensitive) {
+      flags = 'gi';
+    }
+
     let regex;
     try {
-      regex = new RegExp(pattern, 'g');
+      regex = new RegExp(pat, flags);
       input.classList.remove('error');
     } catch (e) {
       input.classList.add('error');

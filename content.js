@@ -5,7 +5,7 @@
   let currentIndex = -1;
   let debounceTimer = null;
   let lastToggle = 0;
-  let caseInsensitive = false;
+  let caseInsensitive = true;
 
   const SKIP_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'OBJECT', 'EMBED',
@@ -193,7 +193,13 @@
     const closeBtn = shadowRoot.querySelector('.close');
 
     // Restore toggle state across open/close
-    if (caseInsensitive) caseBtn.classList.add('active');
+    function updateCaseBtn() {
+      caseBtn.classList.toggle('active', caseInsensitive);
+      caseBtn.title = caseInsensitive
+        ? 'Case insensitive (click to match exact case)'
+        : 'Case sensitive (click to ignore case)';
+    }
+    updateCaseBtn();
 
     input.addEventListener('input', () => {
       clearTimeout(debounceTimer);
@@ -202,7 +208,7 @@
 
     caseBtn.addEventListener('click', () => {
       caseInsensitive = !caseInsensitive;
-      caseBtn.classList.toggle('active', caseInsensitive);
+      updateCaseBtn();
       if (input.value) performSearch(input.value);
     });
 
@@ -242,19 +248,9 @@
       return;
     }
 
-    // Support (?i) prefix as a convenience (not valid JS regex syntax)
-    let flags = 'g';
-    let pat = pattern;
-    if (/^\(\?([gimsuy]+)\)/.test(pat)) {
-      flags = 'g' + RegExp.$1.replace('g', '');
-      pat = pat.replace(/^\(\?[gimsuy]+\)/, '');
-    } else if (caseInsensitive) {
-      flags = 'gi';
-    }
-
     let regex;
     try {
-      regex = new RegExp(pat, flags);
+      regex = new RegExp(pattern, caseInsensitive ? 'gi' : 'g');
       input.classList.remove('error');
     } catch (e) {
       input.classList.add('error');
